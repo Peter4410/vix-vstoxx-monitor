@@ -1,0 +1,34 @@
+name: VIX/vStoxx Spread Monitor
+
+on:
+  workflow_dispatch:   # manual trigger from GitHub UI
+  schedule:
+    # 21:30 UTC = 4:30 PM EST (Nov–Mar) / 5:30 PM EDT (Mar–Nov)
+    # Runs daily after US market close; data is always available by this time.
+    - cron: '30 21 * * *'
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run VIX/vStoxx monitor
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python monitor.py
