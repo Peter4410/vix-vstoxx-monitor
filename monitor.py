@@ -46,7 +46,11 @@ def fetch_latest(ticker: str, period: str = "5d") -> float:
             df = yf.download(ticker, period=period, progress=False, auto_adjust=False)
             if df.empty:
                 raise RuntimeError(f"No data returned for {ticker}")
-            close = df["Close"].dropna()
+            close = df["Close"]
+            # yfinance may return a DataFrame with ticker-level MultiIndex columns
+            if isinstance(close, pd.DataFrame):
+                close = close.iloc[:, 0]
+            close = close.dropna()
             if close.empty:
                 raise RuntimeError(f"'Close' column empty for {ticker}")
             val = float(close.iloc[-1])
