@@ -7,16 +7,17 @@ Strategy (always-on, no regime filter):
   - Skip entry if vStoxx − VIX > 10  (EU crisis / dislocation filter).
   - Position: Short 1× VIX futures, Long ~8× vStoxx futures (dollar-neutral).
 
-Tickers used:
-  VIX    → ^VIX   (CBOE Volatility Index)
-  vStoxx → ^V2TX  (EURO STOXX 50 Volatility Index)
+Data sources:
+  VIX    → Yahoo Finance  (^VIX)
+  vStoxx → Stooq.com      (^VSTOXX) — Yahoo Finance does not carry this index
 """
 
+import io
 import os
 import sys
 import time
 import logging
-from datetime import date
+from datetime import date, timedelta
 
 import yfinance as yf
 import pandas as pd
@@ -38,26 +39,66 @@ RETRY_DELAY = 5   # seconds (multiplied by attempt number)
 # Data fetching
 # ─────────────────────────────────────────────────────────────────────────────
 
-def fetch_latest(ticker: str, period: str = "5d") -> float:
-    """Return the most recent closing price for *ticker* (with retry logic)."""
+def fetch_vix() -> float:
+    """Fetch VIX closing price from Yahoo Finance (^VIX)."""
+    ticker = "^VIX"
     for attempt in range(1, RETRIES + 1):
         try:
             logging.info("Fetching %s (attempt %d)…", ticker, attempt)
-            df = yf.download(ticker, period=period, progress=False, auto_adjust=False)
+            df = yf.download(ticker, period="5d", progress=False, auto_adjust=False)
             if df.empty:
-                raise RuntimeError(f"No data returned for {ticker}")
+                raise RuntimeError("No data returned for ^VIX")
             close = df["Close"]
-            # yfinance may return a DataFrame with ticker-level MultiIndex columns
             if isinstance(close, pd.DataFrame):
                 close = close.iloc[:, 0]
             close = close.dropna()
             if close.empty:
-                raise RuntimeError(f"'Close' column empty for {ticker}")
+                raise RuntimeError("'Close' column empty for ^VIX")
             val = float(close.iloc[-1])
-            logging.info("  %s = %.4f  (date: %s)", ticker, val, close.index[-1].date())
+            logging.info("  VIX = %.4f  (date: %s)", val, close.index[-1].date())
             return val
         except Exception as exc:
-            logging.warning("Attempt %d failed for %s: %s", attempt, ticker, exc)
+            logging.warning("Attempt %d failed for ^VIX: %s", attempt, exc)
+            if attempt < RETRIES:
+                time.sleep(RETRY_DELAY * attempt)
+            else:
+                raise
+
+
+def fetch_vstoxx() -> float:
+    """
+    Fetch VSTOXX closing price from stooq.com.
+
+    Yahoo Finance does not carry the EURO STOXX 50 Volatility Index (^V2TX).
+    Stooq.com provides it under the symbol ^vstoxx and returns a plain CSV
+    — no API key required.
+    """
+    today = date.today()
+    start = (today - timedelta(days=10)).strftime("%Y%m%d")
+    end   = today.strftime("%Y%m%d")
+    url   = f"https://stooq.com/q/d/l/?s=^vstoxx&d1={start}&d2={end}&i=d"
+
+    for attempt in range(1, RETRIES + 1):
+        try:
+            logging.info("Fetching vStoxx from stooq (attempt %d)…", attempt)
+            r = requests.get(url, timeout=15)
+            r.raise_for_status()
+
+            df = pd.read_csv(io.StringIO(r.text))
+            if df.empty or "Close" not in df.columns:
+                raise RuntimeError("Unexpected stooq response format")
+
+            df = df[df["Close"] > 0].dropna(subset=["Close"])
+            if df.empty:
+                raise RuntimeError("No valid vStoxx prices returned from stooq")
+
+            val      = float(df["Close"].iloc[-1])
+            date_str = df["Date"].iloc[-1]
+            logging.info("  vStoxx = %.4f  (date: %s)", val, date_str)
+            return val
+
+        except Exception as exc:
+            logging.warning("Attempt %d failed for vStoxx (stooq): %s", attempt, exc)
             if attempt < RETRIES:
                 time.sleep(RETRY_DELAY * attempt)
             else:
@@ -197,8 +238,8 @@ def main() -> None:
         sys.exit(2)
 
     try:
-        vix     = fetch_latest("^VIX")
-        vstoxx  = fetch_latest("^V2TX")
+        vix     = fetch_vix()
+        vstoxx  = fetch_vstoxx()
         result  = evaluate(vix, vstoxx)
         message = build_message(vix, vstoxx, result)
 

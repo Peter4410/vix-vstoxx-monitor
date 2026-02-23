@@ -62,10 +62,10 @@ Actions are enabled by default on new repos. The workflow will fire automaticall
 
 ## Data sources
 
-| Index | Ticker | Provider |
+| Index | Symbol | Provider |
 |-------|--------|----------|
-| VIX   | `^VIX`  | Yahoo Finance via yfinance |
-| vStoxx | `^V2TX` | Yahoo Finance via yfinance |
+| VIX   | `^VIX`     | Yahoo Finance via yfinance |
+| vStoxx | `^vstoxx` | [Stooq.com](https://stooq.com) — Yahoo Finance does not carry this index |
 
 ## Sample Telegram alerts
 
