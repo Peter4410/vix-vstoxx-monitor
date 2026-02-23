@@ -8,16 +8,15 @@ Strategy (always-on, no regime filter):
   - Position: Short 1× VIX futures, Long ~8× vStoxx futures (dollar-neutral).
 
 Data sources:
-  VIX    → Yahoo Finance  (^VIX)
-  vStoxx → Stooq.com      (^VSTOXX) — Yahoo Finance does not carry this index
+  VIX    → Yahoo Finance    (^VIX)   — via yfinance
+  vStoxx → Investing.com   (id:1498) — via curl_cffi (bundled with yfinance)
 """
 
-import io
 import os
 import sys
 import time
 import logging
-from datetime import date, timedelta
+from datetime import date, datetime
 
 import yfinance as yf
 import pandas as pd
@@ -67,38 +66,47 @@ def fetch_vix() -> float:
 
 def fetch_vstoxx() -> float:
     """
-    Fetch VSTOXX closing price from stooq.com.
+    Fetch the latest VSTOXX closing price from Investing.com.
 
-    Yahoo Finance does not carry the EURO STOXX 50 Volatility Index (^V2TX).
-    Stooq.com provides it under the symbol ^vstoxx and returns a plain CSV
-    — no API key required.
+    Yahoo Finance does not carry the EURO STOXX 50 Volatility Index.
+    We use curl_cffi (already installed as a yfinance dependency) to fetch
+    from Investing.com's internal chart API.
+
+    Endpoint : api.investing.com/api/financialdata/1498/historical/chart/
+    Instrument ID 1498 = VSTOXX (EURO STOXX 50 Volatility Index)
+    Data format: JSON array of [timestamp_ms, open, high, low, close, ...]
     """
-    today = date.today()
-    start = (today - timedelta(days=10)).strftime("%Y%m%d")
-    end   = today.strftime("%Y%m%d")
-    url   = f"https://stooq.com/q/d/l/?s=^vstoxx&d1={start}&d2={end}&i=d"
+    from curl_cffi import requests as cffi_req
+    from datetime import timezone
+
+    url = (
+        "https://api.investing.com/api/financialdata/1498/historical/chart/"
+        "?period=P1M&interval=P1D&pointscount=60"
+    )
 
     for attempt in range(1, RETRIES + 1):
         try:
-            logging.info("Fetching vStoxx from stooq (attempt %d)…", attempt)
-            r = requests.get(url, timeout=15)
+            logging.info("Fetching vStoxx from investing.com (attempt %d)…", attempt)
+            r = cffi_req.get(url, impersonate="chrome110", timeout=20)
             r.raise_for_status()
 
-            df = pd.read_csv(io.StringIO(r.text))
-            if df.empty or "Close" not in df.columns:
-                raise RuntimeError("Unexpected stooq response format")
+            payload = r.json()
+            rows = payload.get("data", [])
+            if not rows:
+                raise RuntimeError("Empty data array from investing.com")
 
-            df = df[df["Close"] > 0].dropna(subset=["Close"])
-            if df.empty:
-                raise RuntimeError("No valid vStoxx prices returned from stooq")
+            # Each row: [timestamp_ms, open, high, low, close, ...]
+            # Rows are sorted oldest → newest; last row = most recent session
+            latest = rows[-1]
+            ts_ms  = latest[0]
+            close  = float(latest[4])
 
-            val      = float(df["Close"].iloc[-1])
-            date_str = df["Date"].iloc[-1]
-            logging.info("  vStoxx = %.4f  (date: %s)", val, date_str)
-            return val
+            date_str = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+            logging.info("  vStoxx = %.4f  (date: %s)", close, date_str)
+            return close
 
         except Exception as exc:
-            logging.warning("Attempt %d failed for vStoxx (stooq): %s", attempt, exc)
+            logging.warning("Attempt %d failed for vStoxx: %s", attempt, exc)
             if attempt < RETRIES:
                 time.sleep(RETRY_DELAY * attempt)
             else:
