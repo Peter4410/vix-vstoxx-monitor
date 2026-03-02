@@ -25,9 +25,10 @@ import requests
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 # ── Strategy parameters ────────────────────────────────────────────────────────
-EU_CRISIS_THRESHOLD = 10.0   # Skip entry if vStoxx − VIX exceeds this
-VSTOXX_PER_VIX     = 8       # ~dollar-neutral ratio: short 1 VIX, long 8 vStoxx
-WEEK_ONE_MAX_DAY   = 7       # Days 1–7 of the month define "week 1"
+EU_CRISIS_THRESHOLD         = 10.0   # Skip entry if vStoxx − VIX exceeds this
+VSTOXX_PER_VIX              = 8      # ~dollar-neutral ratio: short 1 VIX, long 8 vStoxx
+WEEK_ONE_MAX_DAY            = 7      # Days 1–7 of the month define "week 1"
+CORRELATION_ALERT_THRESHOLD = 30.0   # % rise in BOTH VIX and vStoxx over 5 trading days
 
 # ── Network settings ──────────────────────────────────────────────────────────
 RETRIES     = 3
@@ -38,13 +39,13 @@ RETRY_DELAY = 5   # seconds (multiplied by attempt number)
 # Data fetching
 # ─────────────────────────────────────────────────────────────────────────────
 
-def fetch_vix() -> float:
-    """Fetch VIX closing price from Yahoo Finance (^VIX)."""
+def _fetch_vix_series(period: str = "5d") -> "pd.Series":
+    """Download VIX close-price series from Yahoo Finance (^VIX)."""
     ticker = "^VIX"
     for attempt in range(1, RETRIES + 1):
         try:
             logging.info("Fetching %s (attempt %d)…", ticker, attempt)
-            df = yf.download(ticker, period="5d", progress=False, auto_adjust=False)
+            df = yf.download(ticker, period=period, progress=False, auto_adjust=False)
             if df.empty:
                 raise RuntimeError("No data returned for ^VIX")
             close = df["Close"]
@@ -53,9 +54,7 @@ def fetch_vix() -> float:
             close = close.dropna()
             if close.empty:
                 raise RuntimeError("'Close' column empty for ^VIX")
-            val = float(close.iloc[-1])
-            logging.info("  VIX = %.4f  (date: %s)", val, close.index[-1].date())
-            return val
+            return close
         except Exception as exc:
             logging.warning("Attempt %d failed for ^VIX: %s", attempt, exc)
             if attempt < RETRIES:
@@ -64,9 +63,32 @@ def fetch_vix() -> float:
                 raise
 
 
-def fetch_vstoxx() -> float:
+def fetch_vix() -> float:
+    """Fetch VIX closing price from Yahoo Finance (^VIX)."""
+    close = _fetch_vix_series(period="5d")
+    val = float(close.iloc[-1])
+    logging.info("  VIX = %.4f  (date: %s)", val, close.index[-1].date())
+    return val
+
+
+def fetch_vix_5d_pct() -> tuple[float, float]:
     """
-    Fetch the latest VSTOXX closing price from Investing.com.
+    Fetch VIX history and return (pct_5d_change, today_value).
+    pct_5d_change = (today − 5_trading_days_ago) / 5_trading_days_ago * 100
+    """
+    close = _fetch_vix_series(period="1mo")
+    if len(close) < 6:
+        raise RuntimeError(f"Insufficient ^VIX history ({len(close)} rows, need ≥ 6)")
+    today_val     = float(close.iloc[-1])
+    five_days_ago = float(close.iloc[-6])
+    pct = (today_val - five_days_ago) / five_days_ago * 100
+    logging.info("  VIX 5-day: %.4f → %.4f  (%+.2f%%)", five_days_ago, today_val, pct)
+    return pct, today_val
+
+
+def _fetch_vstoxx_rows() -> list:
+    """
+    Fetch raw vStoxx data rows from Investing.com.
 
     Yahoo Finance does not carry the EURO STOXX 50 Volatility Index.
     We use curl_cffi (already installed as a yfinance dependency) to fetch
@@ -77,7 +99,6 @@ def fetch_vstoxx() -> float:
     Data format: JSON array of [timestamp_ms, open, high, low, close, ...]
     """
     from curl_cffi import requests as cffi_req
-    from datetime import timezone
 
     url = (
         "https://api.investing.com/api/financialdata/1498/historical/chart/"
@@ -89,28 +110,49 @@ def fetch_vstoxx() -> float:
             logging.info("Fetching vStoxx from investing.com (attempt %d)…", attempt)
             r = cffi_req.get(url, impersonate="chrome110", timeout=20)
             r.raise_for_status()
-
-            payload = r.json()
-            rows = payload.get("data", [])
+            rows = r.json().get("data", [])
             if not rows:
                 raise RuntimeError("Empty data array from investing.com")
-
-            # Each row: [timestamp_ms, open, high, low, close, ...]
-            # Rows are sorted oldest → newest; last row = most recent session
-            latest = rows[-1]
-            ts_ms  = latest[0]
-            close  = float(latest[4])
-
-            date_str = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
-            logging.info("  vStoxx = %.4f  (date: %s)", close, date_str)
-            return close
-
+            return rows
         except Exception as exc:
             logging.warning("Attempt %d failed for vStoxx: %s", attempt, exc)
             if attempt < RETRIES:
                 time.sleep(RETRY_DELAY * attempt)
             else:
                 raise
+
+
+def fetch_vstoxx() -> float:
+    """
+    Fetch the latest VSTOXX closing price from Investing.com.
+
+    Rows are sorted oldest → newest; last row = most recent session.
+    Each row: [timestamp_ms, open, high, low, close, ...]
+    """
+    from datetime import timezone
+
+    rows   = _fetch_vstoxx_rows()
+    latest = rows[-1]
+    ts_ms  = latest[0]
+    close  = float(latest[4])
+    date_str = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+    logging.info("  vStoxx = %.4f  (date: %s)", close, date_str)
+    return close
+
+
+def fetch_vstoxx_5d_pct() -> tuple[float, float]:
+    """
+    Fetch vStoxx history and return (pct_5d_change, today_value).
+    pct_5d_change = (today − 5_trading_days_ago) / 5_trading_days_ago * 100
+    """
+    rows = _fetch_vstoxx_rows()
+    if len(rows) < 6:
+        raise RuntimeError(f"Insufficient vStoxx history ({len(rows)} rows, need ≥ 6)")
+    today_val     = float(rows[-1][4])
+    five_days_ago = float(rows[-6][4])
+    pct = (today_val - five_days_ago) / five_days_ago * 100
+    logging.info("  vStoxx 5-day: %.4f → %.4f  (%+.2f%%)", five_days_ago, today_val, pct)
+    return pct, today_val
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -124,24 +166,40 @@ def is_week_one(today: date | None = None) -> bool:
     return today.day <= WEEK_ONE_MAX_DAY
 
 
-def evaluate(vix: float, vstoxx: float, today: date | None = None) -> dict:
+def evaluate(
+    vix: float,
+    vstoxx: float,
+    pct_change_vix: float = 0.0,
+    pct_change_vstoxx: float = 0.0,
+    today: date | None = None,
+) -> dict:
     """
     Evaluate all entry conditions and return a result dict:
-      spread     : vStoxx − VIX
-      eu_crisis  : True if spread > EU_CRISIS_THRESHOLD
-      week_one   : True if today is in week 1 of the month
-      enter      : True iff week_one AND NOT eu_crisis
+      spread             : vStoxx − VIX
+      eu_crisis          : True if spread > EU_CRISIS_THRESHOLD
+      week_one           : True if today is in week 1 of the month
+      enter              : True iff week_one AND NOT eu_crisis
+      pct_change_vix     : VIX 5-trading-day % change
+      pct_change_vstoxx  : vStoxx 5-trading-day % change
+      correlation_alert  : True if BOTH pct changes > CORRELATION_ALERT_THRESHOLD
     """
     spread    = vstoxx - vix
     eu_crisis = spread > EU_CRISIS_THRESHOLD
     week_one  = is_week_one(today)
     enter     = week_one and not eu_crisis
+    correlation_alert = (
+        pct_change_vix    > CORRELATION_ALERT_THRESHOLD
+        and pct_change_vstoxx > CORRELATION_ALERT_THRESHOLD
+    )
 
     return {
-        "spread":    spread,
-        "eu_crisis": eu_crisis,
-        "week_one":  week_one,
-        "enter":     enter,
+        "spread":            spread,
+        "eu_crisis":         eu_crisis,
+        "week_one":          week_one,
+        "enter":             enter,
+        "pct_change_vix":    pct_change_vix,
+        "pct_change_vstoxx": pct_change_vstoxx,
+        "correlation_alert": correlation_alert,
     }
 
 
@@ -150,8 +208,11 @@ def evaluate(vix: float, vstoxx: float, today: date | None = None) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def build_message(vix: float, vstoxx: float, result: dict) -> str:
-    today_str = date.today().strftime("%A, %d %b %Y")
-    spread    = result["spread"]
+    today_str         = date.today().strftime("%A, %d %b %Y")
+    spread            = result["spread"]
+    pct_change_vix    = result["pct_change_vix"]
+    pct_change_vstoxx = result["pct_change_vstoxx"]
+    correlation_alert = result["correlation_alert"]
 
     lines = [
         f"📊 <b>VIX / vStoxx Monitor</b>",
@@ -181,10 +242,32 @@ def build_message(vix: float, vstoxx: float, result: dict) -> str:
             f"(spread {spread:+.2f} ≤ {EU_CRISIS_THRESHOLD:.0f})"
         )
 
+    # Correlation risk
+    if correlation_alert:
+        lines.append(
+            f"⚡ Corr. Risk:    🔴 ALERT — "
+            f"VIX +{pct_change_vix:.1f}% & vStoxx +{pct_change_vstoxx:.1f}% in 5 days"
+        )
+    else:
+        lines.append(
+            f"⚡ Corr. Risk:    ✅ CLEAR  "
+            f"(VIX {pct_change_vix:+.1f}% / vStoxx {pct_change_vstoxx:+.1f}% over 5 days)"
+        )
+
     lines.append("")
 
     # ── Final verdict ──────────────────────────────────────────────────────
-    if result["enter"]:
+    # Correlation spike overrides all other signals
+    if correlation_alert:
+        lines += [
+            "━━━━━━━━━━━━━━━━━━━━━━━",
+            "🔴 <b>FLATTEN POSITION</b> — Correlation spike detected",
+            "   Both VIX and vStoxx rose >30% in 5 days",
+            "   Global correlated melt-up — spread thesis breaks down",
+            "   Exit spread immediately, re-assess when volatility stabilises",
+            "━━━━━━━━━━━━━━━━━━━━━━━",
+        ]
+    elif result["enter"]:
         lines += [
             "━━━━━━━━━━━━━━━━━━━━━━━",
             "🟢 <b>ENTER TRADE</b>",
@@ -246,9 +329,15 @@ def main() -> None:
         sys.exit(2)
 
     try:
-        vix     = fetch_vix()
-        vstoxx  = fetch_vstoxx()
-        result  = evaluate(vix, vstoxx)
+        # Fetch current spot values
+        vix    = fetch_vix()
+        vstoxx = fetch_vstoxx()
+
+        # Fetch 5-trading-day % changes for correlation risk
+        pct_change_vix,    _ = fetch_vix_5d_pct()
+        pct_change_vstoxx, _ = fetch_vstoxx_5d_pct()
+
+        result  = evaluate(vix, vstoxx, pct_change_vix, pct_change_vstoxx)
         message = build_message(vix, vstoxx, result)
 
         logging.info("\n%s", message)
