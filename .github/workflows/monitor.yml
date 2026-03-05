@@ -5,7 +5,10 @@ on:
   schedule:
     # 21:30 UTC = 4:30 PM EST (Nov–Mar) / 5:30 PM EDT (Mar–Nov)
     # Runs daily after US market close; data is always available by this time.
-    - cron: '30 21 * * *'
+    - cron: '30 21 * * 1-5'   # weekdays only
+
+permissions:
+  contents: write   # needed to commit state.json (EU crisis hysteresis) back to repo
 
 jobs:
   monitor:
@@ -32,3 +35,11 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python monitor.py
+
+      - name: Commit updated state
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add state.json
+          git diff --staged --quiet || git commit -m "chore: update EU crisis state [skip ci]"
+          git push
