@@ -375,7 +375,7 @@ def build_message(vix: float, vstoxx: float, result: dict) -> str:
     if eu_crisis:
         lines.append(
             f"⚠️  EU Crisis filter: 🔴 ACTIVE  "
-            f"(spread {spread:+.2f} — clears when < {EU_CRISIS_EXIT:.0f})"
+            f"(spread {spread:+.2f} — clears when &lt; {EU_CRISIS_EXIT:.0f})"
         )
     elif spread > EU_CRISIS_EXIT:
         lines.append(
@@ -385,7 +385,7 @@ def build_message(vix: float, vstoxx: float, result: dict) -> str:
     else:
         lines.append(
             f"🛡️  EU Crisis filter: ✅ CLEAR  "
-            f"(spread {spread:+.2f} < {EU_CRISIS_ENTER:.0f})"
+            f"(spread {spread:+.2f} &lt; {EU_CRISIS_ENTER:.0f})"
         )
 
     # ── Correlation risk ───────────────────────────────────────────────────
@@ -454,8 +454,8 @@ def build_message(vix: float, vstoxx: float, result: dict) -> str:
         lines += [
             "━━━━━━━━━━━━━━━━━━━━━━━",
             "🔴 <b>SKIP ENTRY</b> — EU crisis filter active",
-            f"   Spread ({spread:+.2f}) > trigger ({EU_CRISIS_ENTER:.0f})",
-            f"   Clears when spread < {EU_CRISIS_EXIT:.0f}",
+            f"   Spread ({spread:+.2f}) &gt; trigger ({EU_CRISIS_ENTER:.0f})",
+            f"   Clears when spread &lt; {EU_CRISIS_EXIT:.0f}",
             "━━━━━━━━━━━━━━━━━━━━━━━",
         ]
 
