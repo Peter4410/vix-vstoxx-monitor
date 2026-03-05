@@ -130,7 +130,7 @@ def fetch_vix_history() -> pd.Series:
     return _fetch_vix_series(period="2y")
 
 
-def _fetch_vstoxx_rows(pointscount: int = 60) -> list:
+def _fetch_vstoxx_rows(period: str = "P1M", pointscount: int = 60) -> list:
     """
     Fetch raw vStoxx data rows from Investing.com.
     Instrument ID 1498 = VSTOXX. Each row: [timestamp_ms, open, high, low, close, ...]
@@ -139,12 +139,12 @@ def _fetch_vstoxx_rows(pointscount: int = 60) -> list:
 
     url = (
         "https://api.investing.com/api/financialdata/1498/historical/chart/"
-        f"?period=P2Y&interval=P1D&pointscount={pointscount}"
+        f"?period={period}&interval=P1D&pointscount={pointscount}"
     )
 
     for attempt in range(1, RETRIES + 1):
         try:
-            logging.info("Fetching vStoxx (pointscount=%d, attempt %d)…", pointscount, attempt)
+            logging.info("Fetching vStoxx (period=%s, pointscount=%d, attempt %d)…", period, pointscount, attempt)
             r = cffi_req.get(url, impersonate="chrome110", timeout=20)
             r.raise_for_status()
             rows = r.json().get("data", [])
@@ -162,7 +162,7 @@ def _fetch_vstoxx_rows(pointscount: int = 60) -> list:
 def fetch_vstoxx() -> float:
     """Fetch the latest VSTOXX closing price from Investing.com."""
     from datetime import timezone
-    rows   = _fetch_vstoxx_rows(pointscount=60)
+    rows   = _fetch_vstoxx_rows(period="P1M", pointscount=60)
     latest = rows[-1]
     close  = float(latest[4])
     date_str = datetime.fromtimestamp(latest[0] / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
@@ -172,7 +172,7 @@ def fetch_vstoxx() -> float:
 
 def fetch_vstoxx_5d_pct() -> tuple[float, float]:
     """Return (pct_5d_change, today_value) for vStoxx."""
-    rows = _fetch_vstoxx_rows(pointscount=60)
+    rows = _fetch_vstoxx_rows(period="P1M", pointscount=60)
     if len(rows) < 6:
         raise RuntimeError(f"Insufficient vStoxx history ({len(rows)} rows, need ≥ 6)")
     today_val     = float(rows[-1][4])
@@ -183,11 +183,24 @@ def fetch_vstoxx_5d_pct() -> tuple[float, float]:
 
 
 def fetch_vstoxx_history() -> pd.Series:
-    """Fetch up to 2 years of vStoxx history for HAR-RV model fitting."""
-    rows  = _fetch_vstoxx_rows(pointscount=730)
-    dates = [datetime.fromtimestamp(r[0] / 1000).date() for r in rows]
-    vals  = [float(r[4]) for r in rows]
-    return pd.Series(vals, index=pd.to_datetime(dates)).sort_index()
+    """
+    Fetch as much vStoxx history as investing.com will return for HAR-RV fitting.
+    Tries progressively shorter periods until one succeeds.
+    HAR model needs ≥ 100 rows; returns whatever is available (model skips if too short).
+    """
+    for period, points in [("P1Y", 365), ("P6M", 180), ("P3M", 90), ("P1M", 60)]:
+        try:
+            rows = _fetch_vstoxx_rows(period=period, pointscount=points)
+            dates = [datetime.fromtimestamp(r[0] / 1000).date() for r in rows]
+            vals  = [float(r[4]) for r in rows]
+            series = pd.Series(vals, index=pd.to_datetime(dates)).sort_index()
+            logging.info("  vStoxx history: %d rows (period=%s)", len(series), period)
+            return series
+        except Exception as exc:
+            logging.warning("vStoxx history period=%s failed: %s — trying shorter period…", period, exc)
+    # Final fallback: return empty series (HAR will be skipped gracefully)
+    logging.warning("vStoxx history: all periods failed — HAR-RV will be skipped.")
+    return pd.Series(dtype=float)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
