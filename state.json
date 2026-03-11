@@ -1,6 +1,6 @@
 {
   "eu_crisis_active": false,
-  "last_run": "2026-03-10",
+  "last_run": "2026-03-11",
   "trade_active": false,
   "trade_entry_date": null,
   "trade_entry_spread": null,
@@ -8,7 +8,7 @@
   "trade_entry_vstoxx": null,
   "time_stop_alerted": false,
   "time_stop_active": false,
-  "roll_alerted_expiry": null,
+  "roll_alerted_expiry": "2026-03-18",
   "recommended_vix_contracts": 0,
   "recommended_vstoxx_contracts": 0,
   "kelly_fraction": 0.0
