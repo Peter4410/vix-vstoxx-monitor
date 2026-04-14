@@ -35,7 +35,7 @@ Changes vs v3:
 
 Data sources:
   VIX    → Yahoo Finance    (^VIX)   — via yfinance
-  vStoxx → Investing.com   (id:1498) — via curl_cffi (bundled with yfinance)
+  vStoxx → Yahoo Finance    (^V2TX)  — via yfinance
   MOVE   → Yahoo Finance    (^MOVE)  — via yfinance
 """
 
@@ -210,29 +210,24 @@ def fetch_move() -> float | None:
     return None
 
 
-def _fetch_vstoxx_rows(period: str = "P1M", pointscount: int = 60) -> list:
-    """
-    Fetch raw vStoxx data rows from Investing.com.
-    Instrument ID 1498 = VSTOXX. Each row: [timestamp_ms, open, high, low, close, ...]
-    """
-    from curl_cffi import requests as cffi_req
-
-    url = (
-        "https://api.investing.com/api/financialdata/1498/historical/chart/"
-        f"?period={period}&interval=P1D&pointscount={pointscount}"
-    )
-
+def _fetch_vstoxx_series(period: str = "5d") -> pd.Series:
+    """Download VSTOXX (^V2TX) close-price series from Yahoo Finance."""
+    ticker = "^V2TX"
     for attempt in range(1, RETRIES + 1):
         try:
-            logging.info("Fetching vStoxx (period=%s, pointscount=%d, attempt %d)…", period, pointscount, attempt)
-            r = cffi_req.get(url, impersonate="chrome110", timeout=20)
-            r.raise_for_status()
-            rows = r.json().get("data", [])
-            if not rows:
-                raise RuntimeError("Empty data array from investing.com")
-            return rows
+            logging.info("Fetching %s period=%s (attempt %d)…", ticker, period, attempt)
+            df = yf.download(ticker, period=period, progress=False, auto_adjust=False)
+            if df.empty:
+                raise RuntimeError("No data returned for ^V2TX")
+            close = df["Close"]
+            if isinstance(close, pd.DataFrame):
+                close = close.iloc[:, 0]
+            close = close.dropna()
+            if close.empty:
+                raise RuntimeError("'Close' column empty for ^V2TX")
+            return close
         except Exception as exc:
-            logging.warning("Attempt %d failed for vStoxx: %s", attempt, exc)
+            logging.warning("Attempt %d failed for ^V2TX: %s", attempt, exc)
             if attempt < RETRIES:
                 time.sleep(RETRY_DELAY * attempt)
             else:
@@ -240,23 +235,20 @@ def _fetch_vstoxx_rows(period: str = "P1M", pointscount: int = 60) -> list:
 
 
 def fetch_vstoxx() -> float:
-    """Fetch the latest VSTOXX closing price from Investing.com."""
-    from datetime import timezone
-    rows   = _fetch_vstoxx_rows(period="P1M", pointscount=60)
-    latest = rows[-1]
-    close  = float(latest[4])
-    date_str = datetime.fromtimestamp(latest[0] / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
-    logging.info("  vStoxx = %.4f  (date: %s)", close, date_str)
-    return close
+    """Fetch the latest VSTOXX closing price from Yahoo Finance (^V2TX)."""
+    close = _fetch_vstoxx_series(period="5d")
+    val = float(close.iloc[-1])
+    logging.info("  vStoxx = %.4f  (date: %s)", val, close.index[-1].date())
+    return val
 
 
 def fetch_vstoxx_5d_pct() -> tuple[float, float]:
     """Return (pct_5d_change, today_value) for vStoxx."""
-    rows = _fetch_vstoxx_rows(period="P1M", pointscount=60)
-    if len(rows) < 6:
-        raise RuntimeError(f"Insufficient vStoxx history ({len(rows)} rows, need ≥ 6)")
-    today_val     = float(rows[-1][4])
-    five_days_ago = float(rows[-6][4])
+    close = _fetch_vstoxx_series(period="1mo")
+    if len(close) < 6:
+        raise RuntimeError(f"Insufficient ^V2TX history ({len(close)} rows, need ≥ 6)")
+    today_val     = float(close.iloc[-1])
+    five_days_ago = float(close.iloc[-6])
     pct = (today_val - five_days_ago) / five_days_ago * 100
     logging.info("  vStoxx 5-day: %.4f → %.4f  (%+.2f%%)", five_days_ago, today_val, pct)
     return pct, today_val
@@ -264,16 +256,12 @@ def fetch_vstoxx_5d_pct() -> tuple[float, float]:
 
 def fetch_vstoxx_history() -> pd.Series:
     """
-    Fetch as much vStoxx history as investing.com will return for HAR-RV fitting.
-    Tries progressively shorter periods until one succeeds.
+    Fetch vStoxx (^V2TX) history from Yahoo Finance for HAR-RV fitting.
     HAR model needs ≥ 100 rows; returns whatever is available (model skips if too short).
     """
-    for period, points in [("P1Y", 365), ("P6M", 180), ("P3M", 90), ("P1M", 60)]:
+    for period in ["2y", "1y", "6mo", "3mo"]:
         try:
-            rows = _fetch_vstoxx_rows(period=period, pointscount=points)
-            dates = [datetime.fromtimestamp(r[0] / 1000).date() for r in rows]
-            vals  = [float(r[4]) for r in rows]
-            series = pd.Series(vals, index=pd.to_datetime(dates)).sort_index()
+            series = _fetch_vstoxx_series(period=period)
             logging.info("  vStoxx history: %d rows (period=%s)", len(series), period)
             return series
         except Exception as exc:
