@@ -35,10 +35,12 @@ Changes vs v3:
 
 Data sources:
   VIX    → Yahoo Finance    (^VIX)   — via yfinance
-  vStoxx → Yahoo Finance    (^V2TX)  — via yfinance
+  vStoxx → Stooq            (V2TX.DE) — via requests + STOOQ_API_KEY secret
+           (Yahoo Finance dropped ^V2TX in March 2026)
   MOVE   → Yahoo Finance    (^MOVE)  — via yfinance
 """
 
+import io
 import json
 import os
 import sys
@@ -211,23 +213,61 @@ def fetch_move() -> float | None:
 
 
 def _fetch_vstoxx_series(period: str = "5d") -> pd.Series:
-    """Download VSTOXX (^V2TX) close-price series from Yahoo Finance."""
-    ticker = "^V2TX"
+    """Download VSTOXX (V2TX.DE) close-price series from Stooq.
+
+    Yahoo Finance dropped the ^V2TX ticker in March 2026. This function uses
+    Stooq as the replacement source. Requires the STOOQ_API_KEY environment
+    variable (free key — see https://stooq.com/q/d/?s=v2tx.de&get_apikey).
+    """
+    api_key = os.getenv("STOOQ_API_KEY", "")
+    if not api_key:
+        raise RuntimeError(
+            "STOOQ_API_KEY is not set. Get a free key at "
+            "https://stooq.com/q/d/?s=v2tx.de&get_apikey "
+            "and add it as a GitHub secret named STOOQ_API_KEY."
+        )
+
+    # Map yfinance-style period strings to calendar-day lookbacks
+    period_days = {
+        "5d": 10, "1mo": 40, "3mo": 100, "6mo": 190,
+        "1y": 375, "2y": 745,
+    }
+    lookback = period_days.get(period, 10)
+    d1 = (datetime.now() - timedelta(days=lookback)).strftime("%Y%m%d")
+    d2 = datetime.now().strftime("%Y%m%d")
+    url = (
+        f"https://stooq.com/q/d/l/?s=v2tx.de"
+        f"&d1={d1}&d2={d2}&i=d&apikey={api_key}"
+    )
+
     for attempt in range(1, RETRIES + 1):
         try:
-            logging.info("Fetching %s period=%s (attempt %d)…", ticker, period, attempt)
-            df = yf.download(ticker, period=period, progress=False, auto_adjust=False)
-            if df.empty:
-                raise RuntimeError("No data returned for ^V2TX")
-            close = df["Close"]
-            if isinstance(close, pd.DataFrame):
-                close = close.iloc[:, 0]
-            close = close.dropna()
+            logging.info("Fetching V2TX.DE from Stooq period=%s (attempt %d)…", period, attempt)
+            r = requests.get(url, headers={"User-Agent": "vix-vstoxx-monitor/4.0"}, timeout=20)
+            r.raise_for_status()
+
+            if "apikey" in r.text.lower() or "get your apikey" in r.text.lower():
+                raise RuntimeError(
+                    "Stooq rejected the API key. Check STOOQ_API_KEY is correct. "
+                    "Renew at https://stooq.com/q/d/?s=v2tx.de&get_apikey"
+                )
+
+            df = pd.read_csv(io.StringIO(r.text), parse_dates=["Date"], index_col="Date")
+            if df.empty or "Close" not in df.columns:
+                raise RuntimeError(f"Stooq returned no usable data for V2TX.DE (period={period})")
+
+            close = df["Close"].dropna().sort_index()
             if close.empty:
-                raise RuntimeError("'Close' column empty for ^V2TX")
+                raise RuntimeError(f"Close column empty for V2TX.DE from Stooq (period={period})")
+
+            logging.info(
+                "  V2TX.DE: %d rows, latest=%.2f (%s)",
+                len(close), float(close.iloc[-1]), close.index[-1].date(),
+            )
             return close
+
         except Exception as exc:
-            logging.warning("Attempt %d failed for ^V2TX: %s", attempt, exc)
+            logging.warning("Attempt %d failed for V2TX.DE (Stooq): %s", attempt, exc)
             if attempt < RETRIES:
                 time.sleep(RETRY_DELAY * attempt)
             else:
